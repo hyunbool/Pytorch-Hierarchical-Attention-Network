@@ -48,29 +48,59 @@ class HierarchialAttentionNetwork(nn.Module):
         # |sentence_per_document| = (batch_size)
         # |word_per_sentence| = (batch_size, max_sentence_length)
 
-        packed_segments = pack(document,
-                               lengths=segment_per_document.tolist(),
-                               batch_first=True,
-                               enforce_sorted=False)
-
-        packed_sentences_per_segment = pack(sentence_per_segment,
-                                lengths=segment_per_document.tolist(),
-                                batch_first=True,
-                                enforce_sorted=False)
-        print("2")
 
 
+        word_weights = list()
+        sent_vecs = list()
+        packed_sents = list()
 
-        segment_vecs, sentence_weights = self.sentence_attention_model(packed_segments.data, packed_sentences_per_segment.data)
-        print("4")
 
-        packed_segments_vecs = PackedSequence(data=segment_vecs,
-                                              batch_sizes=packed_segments.batch_sizes,
-                                              sorted_indices=packed_segments.sorted_indices,
-                                              unsorted_indices=packed_segments.unsorted_indices)
+        for i in range(len(document)): # 각 문서마다 for문 진행
+            print("index: ", i)
+            doc = document[i]
+            sent_per_doc = sentence_per_segment[i]
+            word_per_sent = word_per_sentence[i]
 
-        doc_vecs, segment_weights = self.segment_attention_model(packed_segments_vecs,
-                                                                   segment_per_document)
+            packed_words_per_sentence = pack(word_per_sent,
+                                             lengths=sent_per_doc.tolist(),
+                                             batch_first=True,
+                                             enforce_sorted=False)
+
+            packed_sentences = pack(doc,
+                                    lengths=sent_per_doc.tolist(),
+                                    batch_first=True,
+                                    enforce_sorted=False)
+
+            sentence, word = self.word_attention_model(packed_sentences.data,
+                                                                    packed_words_per_sentence.data)
+
+            packed_sents.append(packed_sentences)
+            sent_vecs.append(sentence)
+            word_weights.append(word)
+
+        for i in range(1, len(sent_vecs)):
+            if i < 2:
+                packed_data = torch.cat([sent_vecs[i-1], sent_vecs[i]], dim=0)
+                batchsize = torch.cat([packed_sents[i-1].batch_sizes, packed_sents[i].batch_sizes], dim=0)
+                sortedindices = torch.cat([packed_sents[i - 1].sorted_indices, packed_sents[i].sorted_indices], dim=0)
+                unsortedindices = torch.cat([packed_sents[i - 1].unsorted_indices, packed_sents[i].unsorted_indices], dim=0)
+            else:
+                packed_data = torch.cat([packed_data, sent_vecs[i]], dim=0)
+                batchsize = torch.cat([batchsize, packed_sents[i].batch_sizes], dim=0)
+                sortedindices = torch.cat([sortedindices, packed_sents[i].sorted_indices], dim=0)
+                unsortedindices = torch.cat([unsortedindices, packed_sents[i].unsorted_indices], dim=0)
+
+
+        packed_sentence_vecs = PackedSequence(data=packed_data,
+                                              batch_sizes=batchsize,
+                                              sorted_indices=sortedindices,
+                                              unsorted_indices=unsortedindices)
+
+
+        print(packed_sentence_vecs)
+        print(sentence_per_segment)
+        seg_vecs, sent_weights = self.sentence_attention_model(packed_sentence_vecs,
+                                                                   sentence_per_segment)
 
 
         y = self.softmax(self.output(doc_vecs))
@@ -156,32 +186,18 @@ class SentenceAttention(nn.Module):
                               attention_size=attention_size)
 
 
-## sentence forward 하는거 여기 넣어주기
-    def forward(self, packed_segments, sentence_per_segment):
+    def forward(self, packed_segments, segment_per_document):
         # |packed_sentences| = PackedSequence()
 
-        packed_sentence = pack(packed_segments,
-                               lengths=sentence_per_segment.tolist(),
-                               batch_first=True,
-                               enforce_sorted=False)
-
-        packed_sentences_per_segment = pack(sentence_per_segment,
-                                lengths=segment_per_document.tolist(),
-                                batch_first=True,
-                                enforce_sorted=False)
-
-
-        print("4")
-
         # Apply RNN and get hiddens layers of each sentences
-        last_hiddens, _ = self.rnn(packed_sentences)
+        last_hiddens, _ = self.rnn(packed_segments)
 
         # Unpack ouput of rnn model
         last_hiddens, _ = unpack(last_hiddens, batch_first=True)
         # |last_hiddens| = (sentence_length, max(word_per_sentence), hidden_size)
 
         # Based on the length information, gererate mask to prevent that shorter sample has wasted attention.
-        mask = self.generate_mask(sentence_per_segment)
+        mask = self.generate_mask(segment_per_document)
         # |mask| = (sentence_length, max(word_per_sentence))
 
         # Get attention weights and context vectors
@@ -189,6 +205,7 @@ class SentenceAttention(nn.Module):
         # |context_vectors| = (sentence_length, hidden_size)
         # |context_weights| = (sentence_length, max(word_per_sentence))
 
+        print("end")
         return context_vectors, context_weights
 
     def generate_mask(self, length):
